@@ -14,17 +14,19 @@ use windows_sys::{
         UI::{
             Shell::{
                 Shell_NotifyIconGetRect, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP,
-                NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER,
+                NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NOTIFYICONDATAW,
+                NOTIFYICONDATAW_0, NOTIFYICONIDENTIFIER, NOTIFYICON_VERSION_4,
             },
             WindowsAndMessaging::{
                 ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
                 GetCursorPos, KillTimer, RegisterClassW, RegisterWindowMessageA, SendMessageW,
                 SetForegroundWindow, SetTimer, TrackPopupMenu, CREATESTRUCTW, CW_USEDEFAULT,
                 GWL_USERDATA, HICON, HMENU, MSGFLT_ALLOW, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
-                WM_CREATE, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-                WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE,
-                WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
-                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_OVERLAPPED,
+                WM_CONTEXTMENU, WM_CREATE, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+                WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
+                WM_NCCREATE, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+                WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+                WS_OVERLAPPED,
             },
         },
     },
@@ -36,6 +38,13 @@ use crate::{
 };
 
 pub(crate) use self::icon::WinIcon as PlatformIcon;
+
+// Version-4 shell notify-icon notifications. Not exported by windows-sys 0.x, so
+// define locally. Values are stable across Windows versions.
+// See: https://learn.microsoft.com/windows/win32/api/shellapi/ns-shellapi-notifyicondataw
+const WM_USER_NIN_BASE: u32 = 0x0400; // WM_USER
+const NIN_SELECT: u32 = WM_USER_NIN_BASE; // WM_USER + 0
+const NIN_KEYSELECT: u32 = WM_USER_NIN_BASE + 1; // WM_USER + 1
 
 const WM_USER_TRAYICON: u32 = 6002;
 const WM_USER_UPDATE_TRAYMENU: u32 = 6003;
@@ -348,20 +357,33 @@ unsafe extern "system" fn tray_proc(
         }
 
         WM_USER_TRAYICON
-            if matches!(
-                lparam as u32,
-                WM_LBUTTONDOWN
-                    | WM_RBUTTONDOWN
-                    | WM_MBUTTONDOWN
-                    | WM_LBUTTONUP
-                    | WM_RBUTTONUP
-                    | WM_MBUTTONUP
-                    | WM_LBUTTONDBLCLK
-                    | WM_RBUTTONDBLCLK
-                    | WM_MBUTTONDBLCLK
-                    | WM_MOUSEMOVE
-            ) =>
+            if {
+                // In NOTIFYICON_VERSION_4: LOWORD(lparam) = notification event,
+                // HIWORD(lparam) = icon id, wparam encodes (x, y) screen coords.
+                // For legacy messages (WM_LBUTTONDOWN etc.) LOWORD is the same
+                // as the raw value because their numeric values all fit in 16
+                // bits, so decoding this way is backward-safe.
+                let evt = (lparam as u32) & 0xFFFF;
+                matches!(
+                    evt,
+                    WM_LBUTTONDOWN
+                        | WM_RBUTTONDOWN
+                        | WM_MBUTTONDOWN
+                        | WM_LBUTTONUP
+                        | WM_RBUTTONUP
+                        | WM_MBUTTONUP
+                        | WM_LBUTTONDBLCLK
+                        | WM_RBUTTONDBLCLK
+                        | WM_MBUTTONDBLCLK
+                        | WM_MOUSEMOVE
+                        | WM_CONTEXTMENU
+                        | NIN_SELECT
+                        | NIN_KEYSELECT
+                )
+            } =>
         {
+            let evt = (lparam as u32) & 0xFFFF;
+
             let mut cursor = POINT { x: 0, y: 0 };
             if GetCursorPos(&mut cursor as _) == 0 {
                 return 0;
@@ -375,7 +397,7 @@ unsafe extern "system" fn tray_proc(
                 None => return 0,
             };
 
-            let event = match lparam as u32 {
+            let event = match evt {
                 WM_LBUTTONDOWN => TrayIconEvent::Click {
                     id,
                     rect,
@@ -397,14 +419,22 @@ unsafe extern "system" fn tray_proc(
                     button: MouseButton::Middle,
                     button_state: MouseButtonState::Down,
                 },
-                WM_LBUTTONUP => TrayIconEvent::Click {
+                // Left-button Up. In v4, WM_LBUTTONUP is replaced by
+                // NIN_SELECT / NIN_KEYSELECT for primary activation (and is
+                // the only path that fires when the icon lives in the Win11
+                // overflow flyout). We also keep WM_LBUTTONUP for safety.
+                WM_LBUTTONUP | NIN_SELECT | NIN_KEYSELECT => TrayIconEvent::Click {
                     id,
                     rect,
                     position,
                     button: MouseButton::Left,
                     button_state: MouseButtonState::Up,
                 },
-                WM_RBUTTONUP => TrayIconEvent::Click {
+                // Right-button Up. In v4, WM_RBUTTONUP is replaced by
+                // WM_CONTEXTMENU for primary right-click (and is the only
+                // path that fires from the Win11 overflow flyout). Still
+                // accept WM_RBUTTONUP for safety.
+                WM_RBUTTONUP | WM_CONTEXTMENU => TrayIconEvent::Click {
                     id,
                     rect,
                     position,
@@ -454,14 +484,19 @@ unsafe extern "system" fn tray_proc(
                     }
                 }
 
-                _ => unreachable!(),
+                _ => return 0,
             };
 
             TrayIconEvent::send(event);
 
-            if lparam as u32 == WM_RBUTTONDOWN
-                || (userdata.menu_on_left_click && lparam as u32 == WM_LBUTTONDOWN)
-            {
+            // Pop the context menu on right-click activation. WM_CONTEXTMENU is
+            // the v4 path (fires from the overflow flyout); WM_RBUTTONDOWN is
+            // still sent outside the flyout. Avoid popping twice: only act on
+            // the v4 message when available.
+            let popup_menu = evt == WM_CONTEXTMENU
+                || evt == WM_RBUTTONDOWN
+                || (userdata.menu_on_left_click && evt == WM_LBUTTONDOWN);
+            if popup_menu {
                 if let Some(menu) = userdata.hpopupmenu {
                     show_tray_menu(hwnd, menu, cursor.x, cursor.y);
                 }
@@ -560,7 +595,22 @@ unsafe fn register_tray_icon(
         ..std::mem::zeroed()
     };
 
-    Shell_NotifyIconW(NIM_ADD, &mut nid as _) == TRUE
+    let added = Shell_NotifyIconW(NIM_ADD, &mut nid as _) == TRUE;
+
+    // Opt into NOTIFYICON_VERSION_4 semantics. Required so Windows 11 delivers
+    // click events to icons that live inside the notification-area overflow
+    // flyout; legacy (pre-v4) icons only receive WM_MOUSEMOVE from the flyout
+    // and clicks are silently dropped. In v4, primary activation arrives as
+    // NIN_SELECT / NIN_KEYSELECT (left) and WM_CONTEXTMENU (right), decoded in
+    // tray_proc.
+    if added {
+        nid.Anonymous = NOTIFYICONDATAW_0 {
+            uVersion: NOTIFYICON_VERSION_4,
+        };
+        let _ = Shell_NotifyIconW(NIM_SETVERSION, &mut nid as _);
+    }
+
+    added
 }
 
 #[inline]
