@@ -567,6 +567,25 @@ unsafe fn register_tray_icon(
     hicon: &Option<HICON>,
     tooltip: &Option<String>,
 ) -> bool {
+    // TEMP diagnostic: log every invocation.
+    {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        if let Ok(mut f) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(std::env::temp_dir().join("trokk-tray.log"))
+        {
+            let _ = writeln!(
+                f,
+                "[tray-icon] register_tray_icon pid={} hwnd={:?} id={}",
+                std::process::id(),
+                hwnd as usize,
+                tray_id
+            );
+        }
+    }
+
     let mut h_icon = std::ptr::null_mut();
     let mut flags = NIF_MESSAGE;
     let mut sz_tip: [u16; 128] = [0; 128];
@@ -597,34 +616,45 @@ unsafe fn register_tray_icon(
 
     let added = Shell_NotifyIconW(NIM_ADD, &mut nid as _) == TRUE;
 
-    // Opt into NOTIFYICON_VERSION_4 semantics. Required so Windows 11 delivers
-    // click events to icons that live inside the notification-area overflow
-    // flyout; legacy (pre-v4) icons only receive WM_MOUSEMOVE from the flyout
-    // and clicks are silently dropped. In v4, primary activation arrives as
-    // NIN_SELECT / NIN_KEYSELECT (left) and WM_CONTEXTMENU (right), decoded in
-    // tray_proc.
+    // TEMP: keep NIM_SETVERSION disabled while we diagnose the duplicate-icon
+    // issue. Re-enable once we've confirmed where the duplicate originates.
     //
-    // Use a *minimal* NOTIFYICONDATAW for NIM_SETVERSION — only hWnd, uID, and
-    // the Anonymous union (uVersion). Passing the ADD struct with uFlags still
-    // set causes some Windows builds to register a second (duplicate) icon.
-    if added {
-        let mut ver_nid = NOTIFYICONDATAW {
-            hWnd: hwnd,
-            uID: tray_id,
-            Anonymous: NOTIFYICONDATAW_0 {
-                uVersion: NOTIFYICON_VERSION_4,
-            },
-            ..std::mem::zeroed()
-        };
-        let _ = Shell_NotifyIconW(NIM_SETVERSION, &mut ver_nid as _);
-    }
+    // if added {
+    //     let mut ver_nid = NOTIFYICONDATAW {
+    //         hWnd: hwnd,
+    //         uID: tray_id,
+    //         Anonymous: NOTIFYICONDATAW_0 {
+    //             uVersion: NOTIFYICON_VERSION_4,
+    //         },
+    //         ..std::mem::zeroed()
+    //     };
+    //     let _ = Shell_NotifyIconW(NIM_SETVERSION, &mut ver_nid as _);
+    // }
 
     added
-
 }
 
 #[inline]
 unsafe fn remove_tray_icon(hwnd: HWND, id: u32) {
+    // TEMP diagnostic: log every invocation.
+    {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        if let Ok(mut f) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(std::env::temp_dir().join("trokk-tray.log"))
+        {
+            let _ = writeln!(
+                f,
+                "[tray-icon] remove_tray_icon pid={} hwnd={:?} id={}",
+                std::process::id(),
+                hwnd as usize,
+                id
+            );
+        }
+    }
+
     let mut nid = NOTIFYICONDATAW {
         uFlags: NIF_ICON,
         hWnd: hwnd,
