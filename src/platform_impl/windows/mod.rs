@@ -603,14 +603,24 @@ unsafe fn register_tray_icon(
     // and clicks are silently dropped. In v4, primary activation arrives as
     // NIN_SELECT / NIN_KEYSELECT (left) and WM_CONTEXTMENU (right), decoded in
     // tray_proc.
+    //
+    // Use a *minimal* NOTIFYICONDATAW for NIM_SETVERSION — only hWnd, uID, and
+    // the Anonymous union (uVersion). Passing the ADD struct with uFlags still
+    // set causes some Windows builds to register a second (duplicate) icon.
     if added {
-        nid.Anonymous = NOTIFYICONDATAW_0 {
-            uVersion: NOTIFYICON_VERSION_4,
+        let mut ver_nid = NOTIFYICONDATAW {
+            hWnd: hwnd,
+            uID: tray_id,
+            Anonymous: NOTIFYICONDATAW_0 {
+                uVersion: NOTIFYICON_VERSION_4,
+            },
+            ..std::mem::zeroed()
         };
-        let _ = Shell_NotifyIconW(NIM_SETVERSION, &mut nid as _);
+        let _ = Shell_NotifyIconW(NIM_SETVERSION, &mut ver_nid as _);
     }
 
     added
+
 }
 
 #[inline]
